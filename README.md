@@ -120,11 +120,17 @@ Notes:
   tap wiring being connected to the receiver differently than the other two fans — a
   physical install quirk, not a protocol difference.
 - **The bedroom switch's buttons have visibly different icons than the living
-  room/dining room switches.** This raises a real possibility it's a different SKU
-  entirely, possibly on a different carrier frequency, not just a farther-away unit of
-  the same model 98139. Not yet confirmed by checking the physical model
-  number/FCC ID on the unit itself (would require popping it off the wall) — this is
-  the most promising lead for next time.
+  room/dining room switches**, raising the possibility it's a different SKU entirely,
+  possibly on a different carrier frequency, not just a farther-away unit of the same
+  model 98139. **Confirmed 2026-07-29** by popping the switch off the wall plate: it's
+  model **TR223A**, FCC ID **KUJCE10321** (Chungear Industrial Co.) — a genuinely
+  different remote from the 98139 units, not just a distant unit of the same model.
+  Its filing includes hold-to-dim light control and natural-wind/timer modes that the
+  98139 switches don't appear to have, consistent with a different underlying protocol.
+  Still need to pull the actual carrier frequency/modulation from its FCC filing
+  (fccid.io/KUJCE10321) — the 303.9-304.25MHz range explored in the session below was
+  guesswork based on the (now known to be wrong) same-model assumption and shouldn't be
+  trusted for TR223A.
 
 ### Bedroom troubleshooting session 2 (2026-07-30, Pi relocated to bedroom)
 
@@ -157,26 +163,38 @@ some "press now" windows to have no actual press happen).
 trial-and-error. Living room and dining room are fully decoded and that work can
 proceed independently.
 
+## HA-Side Integration Status (living room + dining room)
+
+The living/dining room switches (model 98139) were fully decoded, and an MQTT
+bridge + Home Assistant automation set was built to keep Bond's assumed fan state in
+sync with real wall-switch presses. That work — including a debounce bug that was found
+during live testing (one physical press briefly firing the automation ~4x and
+desyncing the living room fan's real speed from Bond), the trailing-edge-debounce fix,
+and its deployment status — is tracked separately on the HA host, not here:
+**`FAN_WALLSWITCH_SYNC.md`** in this repo. Read that for current status before touching
+the live service or the 6 "Fan wall switch" automations — as of 2026-07-29 they are
+still deliberately disabled pending one supervised live test.
+
 ## Next Steps
 
-1. **Before another live capture attempt**: check the bedroom switch's actual model
-   number / FCC ID (may require popping it off the wall plate, or checking the
-   original box/manual if kept) to confirm or rule out the different-SKU/
-   different-frequency theory. This is more likely to unblock things than further
-   gain/distance guessing.
-2. Once frequency is confirmed (or if sticking with 303.9-304.25MHz), retry capture
-   dedicating a calm, uninterrupted ~1 minute window — several attempts this session
-   likely missed presses due to mid-session interruptions.
-3. Fix/finish the `OOK_PWM` flex decoder so decoding doesn't depend on the
-   Manchester-zerobit demod's lucky-but-jittery behavior.
-4. Build a small matcher (prefix-match on the stable leading bits, ignoring jittery
-   trailing bits) that maps a decoded packet to `(switch, button)`.
-5. Update `rtl433-mqtt.sh` to the correct frequency and wire the matcher's output into
-   an MQTT topic per switch/button event.
-6. Build a Home Assistant automation that reacts to a wall-switch event by refreshing/
-   correcting the Bond fan's assumed state — for power/light toggles this can directly
-   flip assumed state; for the speed toggle it should trigger a Bond status poll since
-   the exact resulting speed isn't recoverable from the RF code alone.
-7. Decide the gas-meter/fan-monitor dongle-sharing approach long-term (permanent
+1. **Bedroom switch, RF work (this repo):**
+   - Look up TR223A/KUJCE10321's actual carrier frequency and modulation from its FCC
+     filing (fccid.io/KUJCE10321 test report PDF) rather than continuing to guess
+     around 303.9-304.25MHz, which was based on the now-disproven same-model-as-98139
+     assumption.
+   - Once frequency is confirmed, retry capture with a calm, uninterrupted ~1 minute
+     window — several attempts in the last session likely missed presses due to
+     mid-session interruptions.
+   - Fix/finish the `OOK_PWM` flex decoder so decoding doesn't depend on the
+     Manchester-zerobit demod's lucky-but-jittery behavior (this applies to all
+     switches, not just the bedroom one).
+   - Build a small matcher (prefix-match on the stable leading bits, ignoring jittery
+     trailing bits) that maps a decoded packet to `(switch, button)`, and extend
+     `fan_wallswitch_bridge.py` / `rtl433-mqtt.sh` to cover the bedroom switch once
+     its codes are known.
+2. **Living/dining room, HA-side integration:** see `FAN_WALLSWITCH_SYNC.md` — next
+   step there is one carefully supervised live test with the fixed bridge script before
+   re-enabling the 6 disabled automations.
+3. Decide the gas-meter/fan-monitor dongle-sharing approach long-term (permanent
    repurpose vs. a second dongle). For now, the meter services are being left stopped
    indefinitely per user preference — no need to restart them between capture sessions.
