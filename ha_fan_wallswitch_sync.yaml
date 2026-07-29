@@ -1,0 +1,140 @@
+# Home Assistant config for reacting to Ashby Park wall-switch RF events published
+# by the Pi's rtl433-mqtt.service to MQTT topics home/fans/<room>/<button>.
+#
+# Entity IDs (confirmed 2026-07-30 via Developer Tools > States):
+#   fan.living_room_ceiling_fan_2   / light.living_room_ceiling_fan
+#   fan.dining_room_ceiling_fan_2   / light.dining_room_ceiling_fan
+#
+# Design:
+#   - power/light toggle events: since the wall switch is itself a physical toggle,
+#     mirroring that with fan.toggle / light.toggle exactly replicates what happened
+#     at the switch — no state tracking needed, self-correcting by construction.
+#   - fan speed toggle events: Bond has no visibility into wall-switch RF, so it
+#     can't tell us the real current speed either. We track it ourselves with a
+#     `counter` helper per fan (0=off, 1-3=low/med/high) that advances on each
+#     detected toggle, wrapping 3->0, and call fan.turn_on/fan.turn_off with the
+#     computed percentage to match. This also harmlessly re-sends the command to
+#     the (already-correct) physical fan, which keeps Bond's own state in sync too.
+#
+# NOTE the bedroom fan is not included yet (its wall-switch codes aren't decoded —
+# see /home/mark/projects/rtl_433/README.md) and its speed-toggle order was reported
+# as possibly reversed vs. these two fans, so it'll need its own review once decoded.
+
+# --- helpers.yaml (or Settings > Devices & Services > Helpers, create manually) ---
+counter:
+  livingroom_fan_speed_level:
+    name: Living Room Fan Speed Level
+    # initial=0 because the living room fan was off at the time this was
+    # written. Set to match the fan's actual current speed level (0-3) at
+    # the moment you create this helper.
+    initial: 0
+    minimum: 0
+    maximum: 3
+    step: 1
+    restore: true
+  diningroom_fan_speed_level:
+    name: Dining Room Fan Speed Level
+    # initial=2 because at the time this was written the dining room fan was
+    # already running at 66% (level 2) — set this to match whatever the fan's
+    # actual current speed is at the moment you create this helper, not
+    # necessarily 2. It only matters once; `restore: true` keeps it in sync
+    # after that as long as every wall-switch press is captured.
+    initial: 2
+    minimum: 0
+    maximum: 3
+    step: 1
+    restore: true
+
+# --- automations.yaml ---
+automation:
+  - alias: "Fan wall switch - Living Room power toggle"
+    trigger:
+      - platform: mqtt
+        topic: home/fans/livingroom/power
+    action:
+      - service: fan.toggle
+        target:
+          entity_id: fan.living_room_ceiling_fan_2
+
+  - alias: "Fan wall switch - Living Room light toggle"
+    trigger:
+      - platform: mqtt
+        topic: home/fans/livingroom/light
+    action:
+      - service: light.toggle
+        target:
+          entity_id: light.living_room_ceiling_fan
+
+  - alias: "Fan wall switch - Living Room speed toggle"
+    trigger:
+      - platform: mqtt
+        topic: home/fans/livingroom/speed
+    action:
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: counter.livingroom_fan_speed_level
+                state: "3"
+            sequence:
+              - service: counter.reset
+                target:
+                  entity_id: counter.livingroom_fan_speed_level
+              - service: fan.turn_off
+                target:
+                  entity_id: fan.living_room_ceiling_fan_2
+        default:
+          - service: counter.increment
+            target:
+              entity_id: counter.livingroom_fan_speed_level
+          - service: fan.turn_on
+            target:
+              entity_id: fan.living_room_ceiling_fan_2
+            data:
+              percentage: >-
+                {{ (states('counter.livingroom_fan_speed_level') | int + 1) * 33 }}
+
+  - alias: "Fan wall switch - Dining Room power toggle"
+    trigger:
+      - platform: mqtt
+        topic: home/fans/diningroom/power
+    action:
+      - service: fan.toggle
+        target:
+          entity_id: fan.dining_room_ceiling_fan_2
+
+  - alias: "Fan wall switch - Dining Room light toggle"
+    trigger:
+      - platform: mqtt
+        topic: home/fans/diningroom/light
+    action:
+      - service: light.toggle
+        target:
+          entity_id: light.dining_room_ceiling_fan
+
+  - alias: "Fan wall switch - Dining Room speed toggle"
+    trigger:
+      - platform: mqtt
+        topic: home/fans/diningroom/speed
+    action:
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: counter.diningroom_fan_speed_level
+                state: "3"
+            sequence:
+              - service: counter.reset
+                target:
+                  entity_id: counter.diningroom_fan_speed_level
+              - service: fan.turn_off
+                target:
+                  entity_id: fan.dining_room_ceiling_fan_2
+        default:
+          - service: counter.increment
+            target:
+              entity_id: counter.diningroom_fan_speed_level
+          - service: fan.turn_on
+            target:
+              entity_id: fan.dining_room_ceiling_fan_2
+            data:
+              percentage: >-
+                {{ (states('counter.diningroom_fan_speed_level') | int + 1) * 33 }}
