@@ -167,13 +167,19 @@ proceed independently.
 
 The living/dining room switches (model 98139) were fully decoded, and an MQTT
 bridge + Home Assistant automation set was built to keep Bond's assumed fan state in
-sync with real wall-switch presses. That work — including a debounce bug that was found
-during live testing (one physical press briefly firing the automation ~4x and
-desyncing the living room fan's real speed from Bond), the trailing-edge-debounce fix,
-and its deployment status — is tracked separately on the HA host, not here:
-**`FAN_WALLSWITCH_SYNC.md`** in this repo. Read that for current status before touching
-the live service or the 6 "Fan wall switch" automations — as of 2026-07-29 they are
-still deliberately disabled pending one supervised live test.
+sync with real wall-switch presses. Full current status (this changes often) is
+tracked separately, not here: **`FAN_WALLSWITCH_SYNC.md`** in this repo. Read that
+before touching the live service or the 6 "Fan wall switch" automations.
+
+**Status as of 2026-07-30, briefly:** the original debounce bug is fixed and fully
+validated, including on real hardware. But live automation testing then surfaced a
+deeper, currently-blocking problem unrelated to the wall switch at all — **Bond lost
+the ability to control the living room fan entirely** (confirmed via both HA and the
+Bond app directly; Bond Bridge itself is online, so the fault is Bond↔fan or the fan
+itself). Re-pairing was attempted and is incomplete; the remote used for pairing broke
+partway through from repeated button presses. All 6 automations remain disabled.
+Nothing further can be tested here until Bond can control the fan again — see
+`FAN_WALLSWITCH_SYNC.md`'s Immediate TODO for the current blocking priority order.
 
 ## Next Steps
 

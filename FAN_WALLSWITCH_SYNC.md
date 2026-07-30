@@ -16,8 +16,9 @@ state.
 
 Full RF reverse-engineering history, protocol details, and the FCC research trail live
 in a separate git repo: **`/home/mark/projects/rtl_433/README.md`** (on the main dev
-machine, not this HA host). Read that first for background — this file is about the
-HA-side integration and its current problem, not the RF work.
+machine, not this HA host; also on GitHub at `coder999/rtl_433_fan`). Read that first
+for background — this file is about the HA-side integration and its current problem,
+not the RF work.
 
 ## Architecture
 
@@ -41,7 +42,8 @@ Pi-side files:
 - `rtl433-mqtt.service` (systemd, `Conflicts=rtlamr-mqtt.service rtl-tcp.service`
   since there's only one RTL-SDR dongle, shared with the unrelated gas meter project)
 - Source of truth / canonical copies: `/home/mark/projects/rtl_433/` on the main dev
-  machine (git repo) — `fan_wallswitch_bridge.py` and `ha_fan_wallswitch_sync.yaml`
+  machine (git repo, also pushed to GitHub as `coder999/rtl_433_fan`) —
+  `fan_wallswitch_bridge.py` and `ha_fan_wallswitch_sync.yaml`
 
 HA-side (this host, `/config`, also git-tracked):
 - `configuration.yaml` — has `counter: !include counters.yaml` added
@@ -61,7 +63,16 @@ HA-side (this host, `/config`, also git-tracked):
 - `fan.living_room_ceiling_fan_2` / `light.living_room_ceiling_fan`
 - `fan.dining_room_ceiling_fan_2` / `light.dining_room_ceiling_fan`
 
-### Automation behavior
+### Bedroom switch, identified (RF decode not yet done)
+
+Confirmed 2026-07-29 by popping the switch off the wall plate: model **TR223A**,
+FCC ID **KUJCE10321** (Chungear Industrial Co.) — genuinely different hardware from
+the 98139 units used in the living/dining rooms, not just a farther-away unit of the
+same model. Its FCC filing includes hold-to-dim light control and natural-wind/timer
+modes the 98139 switches don't appear to have. Actual RF decode work for this switch
+happens in the `rtl_433` repo, not here — see that repo's README for status.
+
+### Automation behavior (as originally designed — see "What we got wrong" below)
 
 - **power/light toggle**: calls `fan.toggle` / `light.toggle` directly — mirrors the
   physical switch exactly, no state tracking needed.
@@ -75,109 +86,139 @@ HA-side (this host, `/config`, also git-tracked):
   `fan.turn_off`), and call `fan.turn_on` with `percentage = counter_value_before_increment
   * 33` to match. This actively commands Bond, which is why the bug below matters.
 
-## ⚠️ Current status: automations disabled, real bug found, needs fixing
+**This design has known errors — see "What we got wrong today" below before trusting
+any of the above.**
 
-**As of 2026-07-30, all 6 "Fan wall switch" automations are disabled**
-(`enabled: false` added to each entry in `automations.yaml`) because live testing
-uncovered a real bug that actively mis-set the living room fan's real speed.
+## ⚠️ Current status (2026-07-30): blocked on Bond itself, not just the wall-switch bridge
 
-### The bug
+All 6 "Fan wall switch" automations are **disabled**. What started as a debounce bug in
+the RF bridge turned out to be layered on top of a deeper, currently-blocking problem:
+**Bond can't control the living room fan at all right now**, independent of anything
+wall-switch related. Session paused for the day; resume tomorrow.
 
-`fan_wallswitch_bridge.py` used a *leading-edge* debounce (ignore repeats within N
-seconds of the first-seen match) intended to collapse one physical button
-press/hold into a single MQTT event. Two problems were found testing live against the
-real fans:
+### Debounce fix: validated, working
 
-1. **The remote sends ~4 separate repeat-bursts about 2 seconds apart per single
-   tap** — not one continuous burst while held. This is inherent transmitter behavior
-   (probably a reliability/persistence mechanism), not related to how long the button
-   is physically held. A leading-edge debounce shorter than that ~2s gap lets each
-   burst independently trigger the automation, so **one physical press fired the
-   automation ~4 times in ~6-8 seconds.**
-2. For the speed automation specifically, 4 rapid `fan.turn_on`/`fan.turn_off` calls
-   in that short a window caused **Bond's assumed state to desync from the real
-   fan** — almost certainly because the physical fan/receiver rate-limits or drops
-   closely-spaced RF commands from Bond, while Bond has no feedback channel and just
-   assumes each command it sent succeeded. Observed: real fan physically at 100%,
-   Bond/HA showing 0%/off, after what was supposed to be one clean test press.
+The original leading-edge debounce bug (remote sends ~4 repeat RF bursts ~2s apart per
+tap; each burst independently fired the automation, causing ~4 rapid Bond commands in
+6-8 seconds, which desynced the living room fan's real speed from Bond's assumed
+state) is fixed. `fan_wallswitch_bridge.py` now uses trailing-edge debounce
+(`QUIET_PERIOD_SECONDS = 3.0`, restart-on-repeat `threading.Timer` per (room,button)).
 
-This means the speed automation's "actively command Bond to match" design is riskier
-than first thought: a desync doesn't just mean a wrong dashboard reading anymore, it
-means the automation can actively push the physical fan to the wrong speed. Worth
-reconsidering whether to keep the active-set design at all (see Open Questions).
+- Deployed to the Pi (`/usr/local/bin/fan_wallswitch_bridge.py`), confirmed via md5sum.
+- **Offline-validated** against all 18 saved RF captures in `~/fan_rf_captures/`:
+  every capture that decoded a matching code produced exactly one `firing` line,
+  including ones with up to 12 repeat "seen" bursts. (8 of 18 captures decoded nothing
+  at all — likely weak/empty recordings, unrelated to the debounce logic.)
+- **Live-hardware-validated 2026-07-30**: pressed each living room button (power,
+  light, speed) once for real. All three collapsed multiple "seen" bursts into exactly
+  one "firing" + one MQTT publish. One speed-button press initially produced zero
+  detections (no signal at all, matching the pattern seen in offline captures); a
+  second attempt worked normally.
 
-### The fix in progress (drafted, NOT yet deployed/validated)
+**This part of the fix is done and doesn't need to be revisited.**
 
-`fan_wallswitch_bridge.py` was rewritten to use *trailing-edge* debounce instead: on
-each matching packet, (re)start a timer; only publish once the timer expires with no
-new matching packet arriving (i.e. wait for actual silence, using
-`threading.Timer`, keyed per (room,button), cancelling/restarting on every repeat).
-`QUIET_PERIOD_SECONDS` was bumped from an initial `1.0` (still too short — this is
-what caused the 4x-fire incident) to `3.0` (should comfortably bridge the observed
-~2s gap, but this is based on a **single data point** — the remote might occasionally
-have longer gaps or send more than 4 bursts for a longer real hold).
+### What we got wrong today (found via live automation testing)
 
-**This updated version has been edited into the repo copy
-(`/home/mark/projects/rtl_433/fan_wallswitch_bridge.py`) but has NOT been redeployed
-to the Pi or re-tested.** The Pi's `rtl433-mqtt.service` was stopped entirely as a
-safety measure and has not been restarted.
+With the debounce fix validated, the two lowest-risk automations (living room power +
+light toggle) were briefly re-enabled for one supervised live test each. That surfaced
+three separate, previously-undocumented problems:
+
+1. **Speed cycle direction is backwards in the automation.** The automation counts
+   *up*: 33%→66%→100%→off. Real hardware counts *down* from off: off→**100%**→66%→
+   33%→off. Confirmed directly by the user. This needs fixing in the automation logic
+   regardless of which speed-automation design (active-set / passive / guardrail) gets
+   used — see Open Questions.
+2. **The physical "power" button is a master fan+light toggle, not fan-only.**
+   Confirmed both by direct user observation of the wall switch's real behavior, and
+   independently by HA: calling `fan.toggle` on `fan.living_room_ceiling_fan_2`
+   through Bond also flipped `light.living_room_ceiling_fan`'s state at the exact same
+   timestamp, even though the light automation was disabled and no light RF code was
+   seen. The current design (fully independent power/light automations) doesn't match
+   this — needs a redesign, likely a single combined automation, or the power
+   automation needs to also drive the light entity to match.
+3. **Bond can't currently deliver commands to the living room fan at all.** After the
+   power-toggle automation fired once (a real `fan.toggle` call), Bond/HA showed the
+   fan on/100% and light on, but the physical fan and light were confirmed still off.
+   Two more real commands were tried in isolation to debug this (`fan.toggle` again,
+   then an explicit `fan.turn_on`) — **both had zero physical effect**, despite HA
+   reporting success each time. This is not the debounce/multi-fire bug; it's a single
+   clean command failing to do anything, repeatedly. Diagnosis so far:
+   - **Not a network/connectivity issue**: the Bond Bridge (`192.168.0.110`) is online
+     and reachable — responds `200` on its local API (`/v2/sys/version`).
+   - **Not an HA/automation-specific issue**: controlling the fan directly from the
+     Bond app also failed to move it, ruling out anything in our HA automation/
+     integration layer as the cause.
+   - So the fault is somewhere between Bond and the fan's RF receiver, or the fan
+     itself.
+   - **User's response**: deleted the fan's device pairing in Bond and started
+     re-adding it from scratch. Re-pairing requires repeatedly pressing buttons on the
+     fan's remote so Bond can learn the signal. That repeated pressing has now left
+     **the remote itself non-functional** — it stopped responding entirely partway
+     through re-pairing.
+
+### State as of pausing (2026-07-30)
+
+- Bond's fan device for the living room: **deleted, re-pairing not completed.**
+- The remote used for Bond pairing: **not functioning.**
+- All 6 wall-switch automations: **disabled** (the two briefly re-enabled for testing
+  were disabled again once the command-drop problem was found).
+- HA's displayed state was manually corrected to match physical reality before
+  pausing: `fan.living_room_ceiling_fan_2` off/0%, `light.living_room_ceiling_fan`
+  off, `counter.livingroom_fan_speed_level` reset to `0`. (These corrections used the
+  raw-state-override debug technique, which was empirically confirmed today to be
+  side-effect-free — see Open Questions.)
+- Dining room was not touched this session; still fully out of scope pending living
+  room being stable end-to-end.
 
 ## Immediate TODO
 
-Rough priority order:
+Rough priority order — **everything below is blocked on the first item**:
 
-1. **Resync the living room fan's HA state to reality** (real fan was left at
-   physical 100% while HA showed 0%/off, from the bug incident). Two corrections
-   needed, both require genuine service-call access (Developer Tools > States does
-   NOT reliably persist for `counter` helpers — confirmed the hard way):
-   - `counter.set_value` on `counter.livingroom_fan_speed_level` → `3`
-   - Correct `fan.living_room_ceiling_fan_2`'s displayed state to `on` / 100% —
-     for a normal integration-backed entity (unlike counter helpers) Developer
-     Tools > States "Set State" genuinely does work for this without sending a
-     real command to the device, since it's just a debug override of HA's cache
-     and Bond won't proactively overwrite it without a new command being sent.
-   - Double check `counter.diningroom_fan_speed_level` (should be `2`, matching
-     the dining room fan's last known 66%) — probably still correct, wasn't
-     touched during the buggy testing, but verify.
-2. **Deploy the updated `fan_wallswitch_bridge.py`** (trailing-edge debounce,
-   `QUIET_PERIOD_SECONDS=3.0`) to the Pi:
-   ```
-   scp /home/mark/projects/rtl_433/fan_wallswitch_bridge.py raspberrypi:/tmp/
-   ssh raspberrypi 'sudo install -m 755 -o root -g root /tmp/fan_wallswitch_bridge.py /usr/local/bin/fan_wallswitch_bridge.py'
-   ```
-3. **Validate offline first**, not against the real fans — the Pi has saved raw I/Q
-   captures for every known button at `~/fan_rf_captures/<room>_<button>/*.cu8`.
-   Dry-run against those:
-   ```
-   ssh raspberrypi 'python3 /usr/local/bin/fan_wallswitch_bridge.py --dry-run -r ~/fan_rf_captures/livingroom_power/g001_304.25M_2048k.cu8'
-   ```
-   Confirm exactly one "firing" line per file.
-4. **Start the service** and do ONE very carefully monitored live test with
-   automations still disabled — watch `journalctl -u rtl433-mqtt.service -f` on the
-   Pi in real time while pressing a button once, and confirm exactly one
-   "seen"→"firing" cycle (or at least that repeat bursts are all successfully
-   bridged into one firing) before considering it safe.
-5. Only then **re-enable the automations** (remove `enabled: false` from the 6
-   entries in `automations.yaml`, or flip them on in the UI) and do one more
-   careful supervised real test per automation type.
+1. **Get Bond back to being able to control the living room fan at all.** This means,
+   in some order: get or improvise a working remote (repair/replace the broken one, or
+   find another way to let Bond learn the fan's RF protocol), and complete the Bond
+   device re-pairing that was left mid-way. Nothing else here can be tested until this
+   works — confirm via the Bond app directly, independent of HA, before touching any
+   automation again.
+2. **Fix the speed automation's direction bug** (`fan_wallswitch_bridge.py`/
+   `ha_fan_wallswitch_sync.yaml` percentage math currently computes
+   `(counter+1)*33` ascending; needs to model off→100→66→33→off descending instead).
+3. **Redesign the power/light automation split** to account for the power button's
+   real master-toggle behavior (currently two fully independent automations, which is
+   wrong).
+4. Once 1-3 are done, **redo the supervised live test sequence**: power, then light
+   (or their combined replacement), then speed — same one-press-at-a-time,
+   watch-the-logs approach used today, since the debounce fix itself is already
+   validated and doesn't need to be re-proven.
+5. Dining room: same process, after living room is fully stable.
 
 ## Open questions / things worth reconsidering
 
-- **Is 3.0s actually enough?** Only one real burst-timing sample exists. If a longer
-  hold or a different remote unit sends bursts spaced further apart, 3.0s could still
-  under-debounce. Consider either a larger safety margin (5s+) or capturing more
-  timing samples before trusting this.
-- **Should the speed automation actively command Bond at all?** Given a desync in the
-  active-set design causes *worse* real-world harm (wrong physical fan speed) than the
-  original problem (just a wrong dashboard reading), a passive design — log/notify on
-  a speed-toggle event without calling `fan.turn_on`/`turn_off` — might be the safer
-  long-term choice, accepting that the displayed speed won't self-correct. This
-  tradeoff was raised with the user but not conclusively resolved before automations
-  were disabled for safety.
-- **Bedroom switch still isn't decoded** (different SKU/frequency suspected — see the
-  rtl_433 project README) and isn't part of any of this yet.
-- **Power/light toggle automations were probably also affected** by the multi-fire bug
-  (same debounce code path) but appeared to work correctly in testing purely by luck —
-  an even number of extra `fan.toggle`/`light.toggle` calls nets back to the same
-  visible state, masking the bug. Don't assume they're fine just because they looked
-  fine; they need the same re-validation as speed once the fix is deployed.
+- **Is "toggle" fundamentally unreliable for state-correction here?** `fan.toggle`/
+  `light.toggle` decide direction by reading HA's *current believed* state and
+  commanding the opposite. If that believed state is already stale — which is exactly
+  the scenario these automations exist to fix — toggle can compute the wrong
+  direction, or behave unpredictably. Explicit `turn_on`/`turn_off` avoids that
+  particular failure mode, but doesn't solve the deeper problem: the wall-switch RF
+  event only tells us *a change happened*, not what the resulting real state is,
+  unless the fan's true prior state was already known — which is the same visibility
+  gap this whole project exists to close. Worth rethinking the automation logic here,
+  not just swapping toggle for turn_on/turn_off.
+- **Should the speed automation actively command Bond at all?** This was already an
+  open question after the original debounce bug, and today's finding that Bond can
+  drop even a single, non-rapid-fire command makes the case for active-set *weaker*,
+  not stronger — the risk isn't limited to rapid bursts, any single command can
+  silently fail with no feedback to HA. A passive/log-only design (no
+  `fan.turn_on`/`turn_off` calls, just track/notify) avoids ever pushing the fan to a
+  wrong physical speed, at the cost of the displayed speed not self-correcting.
+- **Is 3.0s of debounce quiet-period actually enough long-term?** Validated against
+  one offline dataset and confirmed live today, but still based on limited samples of
+  real burst timing.
+- **Debug state overrides (`POST /api/states/...`, no service call) were empirically
+  confirmed safe today** — set `light.living_room_ceiling_fan` to `on` via raw
+  override only; physical light did not respond, confirming the technique is inert
+  and doesn't reach Bond/the device. This validates the resync technique used
+  throughout this project (e.g. TODO #1 originally, and today's end-of-session
+  corrections).
+- **Bedroom switch still isn't decoded** — see the `rtl_433` repo, unrelated to any of
+  the above.
