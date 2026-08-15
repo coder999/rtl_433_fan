@@ -12,7 +12,7 @@ absolute target speed; see notes below the table.
 
 | Room | Address | Power toggle | Light toggle | Speed command byte | Off (0%) | 33% | 66% | 100% |
 |---|---|---|---|---|---|---|---|---|
-| Living room | `0x01` | `0xCC` | `0xF8` | `0xFF` | trailing `00` | trailing `001` | trailing `10` | **undetermined — reproducibly fails to decode, living-room-specific, see below** |
+| Living room | `0x01` | `0xCC` | `0xF8` | `0xFF` | not confirmed (see below) | trailing `00` | trailing `001` | trailing `10` |
 | Dining room | `0x02` | `0x26` | `0x3C` | `0x3F` | trailing `111` | trailing `100` | trailing `1001` | trailing `110` |
 | Master bedroom | `0x02` | `0x66` | `0x7C` | `0x7F` | trailing `111` | trailing `100` | trailing `1001` | trailing `110` |
 
@@ -24,35 +24,40 @@ Notes:
   (bedroom, all 4 states) and cross-confirmed against Bond's own `HassFanSetSpeed`
   commands (dining + bedroom), which produce byte-identical RF to the wall switch
   reaching the same target. See "Bond RF audit" below for the full story.
-- **Living room speed, re-verified 2026-08-15 with real-time ground truth (light,
-  power, and 3 of 4 speed states):**
+- **CORRECTION (2026-08-15, later same day): the living room speed mapping above was
+  wrong, and there was never a "100% decode failure."** The earlier real-time
+  button-press ground-truth test (below) mis-attributed which captured trailing value
+  went with which light-count state, most likely due to message-ordering confusion
+  during a fast, unconfirmed press sequence — the state that actually never got pinned
+  down was **off**, not 100%. This was only caught because the user directly observed
+  the physical fan and Bond/HA both agreeing on "high" while nothing had touched it
+  since a Bond command I'd logged as producing "66%" — a real, physical
+  contradiction that forced a re-check.
 
-  | Light count | Trailing bits | Confidence |
-  |---|---|---|
-  | off (0%) | `00` | confirmed, 2 independent presses |
-  | 1 light (33%) | `001` | confirmed, 3 independent presses |
-  | 2 lights (66%) | `10` | confirmed, 3 independent presses |
-  | 3 lights (100%) | **undetermined** | see below — reproducibly fails to decode |
+  Corrected via a clean, unambiguous method: a stale duplicate `Living Room Ceiling
+  Fan` HA entity (leftover from the 2026-07-30 broken-pairing saga) was renamed by the
+  user, leaving one real entity to target with `HassFanSetSpeed` directly — no more
+  guessing which of two entities a command actually reaches. Full sweep, each
+  percentage captured cleanly with no demod trouble at all:
 
-  Power (`0xCC`, trailing `0100`) and light (`0xF8`, trailing `1001`) also re-confirmed
-  live, exactly matching the archived 2026-07-29 codes — the archive wasn't mislabeled
-  for those two.
-- **Living room's 100%/"3 lights" state reproducibly fails to auto-decode — living
-  room specifically, not a general 100% issue.** Both dining room (via the Bond audit)
-  and bedroom (both 2026-08-14 and 2026-08-15) decoded their own 100% state cleanly and
-  repeatedly with no trouble. Living room's 100% has failed **3 separate real
-  attempts**, always with a strong, clean signal (SNR 30-35dB, full 25/25 pulses, level
-  not meaningfully different from other presses in the same session that decoded fine —
-  overload was checked and ruled out) — rtl_433's auto-guesser calls it "No clue..."
-  instead of "Manchester coding" like every other code. Pulse and gap width
-  distributions for the failing capture are oddly symmetric (pulse widths ~372µs/760µs,
-  gap widths ~380µs/764µs — nearly mirrored), which may be tripping up the
-  `OOK_MC_ZEROBIT` auto-heuristic specifically for this one bit pattern. Living room
-  also uses a different, shorter trailing-bit scheme than dining/bedroom's shared one
-  (`00`/`001`/`10` vs. `111`/`100`/`1001`/`110`), so whatever's different about this
-  code is specific to living room's own encoding, not the 100% level itself. Needs a
-  dedicated flex decoder or manual pulse-dump decode to resolve — not a capture
-  technique problem, queued as a follow-up, not urgent.
+  | Requested % | Trailing bits |
+  |---|---|
+  | 0% | routes through the power-toggle code (`0xCC`), not a speed-family code |
+  | 33% | `00` |
+  | 66% | `001` |
+  | 100% | `10` |
+
+  **`10` — previously logged as a stuck-at-66%/decode-failure situation — is simply the
+  correct, cleanly-decoding 100%/HIGH code.** It was captured dozens of times across
+  this whole session, always readable, always "Manchester coding." There was no
+  decode failure. The genuinely open item is the **speed-family "off" code**, which
+  Bond's 0% never sends (it uses the power-toggle path instead) — lower priority than
+  it seemed, since power-toggle already covers off functionally; would still need a
+  live physical-button test to pin down if ever needed.
+
+  Power (`0xCC`, trailing `0100`) and light (`0xF8`, trailing `1001`) were correctly
+  identified in the original real-time test and remain confirmed, matching the archived
+  2026-07-29 codes exactly.
 - Address `0x02` is shared by dining room and bedroom — still not fully explained (see
   2026-08-14 entry below) but confirmed not to cause practical collisions, since command
   bytes never overlap between the two switches.
@@ -455,18 +460,23 @@ switches touched. Findings:
 **Remaining next steps:**
 - ~~Work out what the trailing bits actually encode structurally~~ — **solved by the
   Bond RF audit below**: trailing bits are the absolute target speed percentage.
-- **Re-record dining room (and living room) button presses with real-time ground
-  truth, not just replay the July 29 archives (queued, not urgent).** The archived
-  `.cu8` files have no logged record of which physical button/state each file
-  corresponds to beyond the directory name (`diningroom_speed/g001...`, etc.) — that
-  labeling was done live in the original session and could have a mistake (wrong
-  button pressed, or button pressed at an unrecorded/unexpected state). The
-  living/dining "known good" code table has been treated as ground truth throughout
-  this project, including for the address-sharing and trailing-bits-match findings
-  above — worth confirming with the same rigorous method used for bedroom (correlate
-  each press to the switch's own observed state in real time) before leaning on it
-  further, especially since the bedroom/dining trailing-value match is a load-bearing
-  clue for the address-sharing theory.
+- **Methodological lesson (2026-08-15, see the living room correction above): a direct
+  Bond percentage sweep against a single unambiguous HA entity is more reliable ground
+  truth than correlating live button presses to narrated light-count states.** The
+  latter produced a real, wrong mapping for living room (caught only because a physical
+  contradiction forced a re-check) — a fast press-and-narrate sequence with the demod
+  occasionally failing to decode is genuinely easy to mis-pair. Dining and bedroom's
+  mappings were captured via the reliable Bond-sweep method already (not button
+  narration) during the original Bond RF audit, so they don't need the same redo — but
+  **if either ever needs re-verification, use a Bond sweep, not another button-press
+  narration session.**
+- **Re-record dining room (and living room) *power/light* button presses with
+  real-time ground truth, not just replay the July 29 archives (queued, not urgent).**
+  This is now lower-stakes for *speed* specifically (Bond sweeps are the trusted
+  source for that), but power/light codes still come from the original archived
+  captures with no logged ground truth beyond the directory name. Living room's
+  power/light were spot-checked live and matched the archive exactly; dining room's
+  haven't been.
 - The `counter` helper design in `FAN_WALLSWITCH_SYNC.md`, which assumes the speed
   button sends one generic code and so needs a locally-tracked counter to know the
   resulting state, was built on the same now-disproven "jitter" assumption for
