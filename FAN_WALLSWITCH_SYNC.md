@@ -220,5 +220,40 @@ Rough priority order — **everything below is blocked on the first item**:
   and doesn't reach Bond/the device. This validates the resync technique used
   throughout this project (e.g. TODO #1 originally, and today's end-of-session
   corrections).
-- **Bedroom switch still isn't decoded** — see the `rtl_433` repo, unrelated to any of
-  the above.
+- **Bedroom switch decode in progress (2026-08-15)** — light and power buttons
+  confirmed (`0x7C`, `0x66` on address `0x0002`); speed button's meaning
+  (relative-advance vs. per-level absolute code) is unresolved — see the `rtl_433_fan`
+  repo's README for the open question and two queued tests (a clean RF-only trailing-
+  bits comparison, and a Bond-side test below).
+- **RESOLVED (2026-08-15): the `counter`-helper design above is obsolete.** A same-day
+  Bond RF audit (see `rtl_433_fan` repo README, "Bond RF audit") confirmed the speed
+  button's trailing bits are the literal absolute target speed percentage — `111`=off,
+  `100`=33%, `1001`=66%, `110`=100% — the same encoding Bond itself uses when
+  commanding a specific percentage. **The wall-switch bridge can decode the resulting
+  speed directly from the RF packet** and call `fan.turn_on`/`turn_off` with the exact
+  right percentage — no counter helper, no guessing, no "trigger a Bond status poll and
+  hope" fallback needed. This should replace the whole `counter.<room>_fan_speed_level`
+  approach for living/dining, not just apply to a future bedroom automation. Also
+  discovered: Bond itself transmits the identical 304.25MHz protocol as the wall
+  switches (not a separate protocol) — worth keeping in mind for the "single source of
+  truth" idea below, since Bond and the wall switch are indistinguishable at the RF
+  level, not two systems that need reconciling at that layer.
+- **Should there be one canonical "true fan state" HA entity that both Bond and the
+  wall-switch RF events reconcile into, instead of the wall-switch side trying to
+  independently track/correct Bond's state?** (User idea, 2026-08-15, prompted by
+  recalling that Bond has previously accepted a "set state" command from HA without it
+  taking physical effect — see "Bond can't currently deliver commands..." above — so
+  Bond's own displayed/assumed state can't be fully trusted as ground truth either.)
+  The existing `counter.<room>_fan_speed_level` helpers are a first pass at this same
+  idea, but only track the wall-switch side; this would be broader — a single entity
+  both the wall-switch bridge and Bond-state-change events update, that automations
+  and dashboards read instead of trusting Bond's fan entity directly. Not designed yet;
+  revisit once the speed-button RF question above is settled, since the reconciliation
+  design depends on whether the wall switch can report *which* speed it was pressed
+  for or only that a press happened.
+  - **Related test proposed by user, not yet run:** set the fan to a known state using
+    only the wall switch (Bond untouched), then command Bond to a specific speed. If
+    the real fan was already out of sync with whatever Bond internally tracks, the Bond
+    command should fail to land on the intended real speed. Would show whether Bond's
+    own speed-setting logic is itself relative/assumed-state-based (equally vulnerable
+    to the desync problem this whole project exists to fix) or genuinely absolute.

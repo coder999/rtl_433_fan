@@ -4,6 +4,59 @@ Goal: use the Raspberry Pi's RTL-SDR + `rtl_433` to capture and decode the RF si
 sent by the wall switches for the Ashby Park ceiling fans, so Home Assistant can detect
 wall-switch use and stay in sync with the Bond Bridge's assumed fan state.
 
+## Quick reference: decoded RF codes (current as of 2026-08-15)
+
+Every code is `<16-bit address><8-bit command byte><trailing bits>`, transmitted OOK at
+304.25MHz. Trailing bits are **not jitter** — for the speed command they're the
+absolute target speed; see notes below the table.
+
+| Room | Address | Power toggle | Light toggle | Speed command byte | Off (0%) | 33% | 66% | 100% |
+|---|---|---|---|---|---|---|---|---|
+| Living room | `0x01` | `0xCC` | `0xF8` | `0xFF` | trailing `00` | trailing `001` | trailing `10` | **undetermined — reproducibly fails to decode, living-room-specific, see below** |
+| Dining room | `0x02` | `0x26` | `0x3C` | `0x3F` | trailing `111` | trailing `100` | trailing `1001` | trailing `110` |
+| Master bedroom | `0x02` | `0x66` | `0x7C` | `0x7F` | trailing `111` | trailing `100` | trailing `1001` | trailing `110` |
+
+Notes:
+- **Power and light are simple toggles** — one code each, same bits regardless of
+  on/off direction (confirmed via live Bond commands going both directions).
+- **Speed's trailing bits are the absolute target percentage**, not a "next" pulse —
+  confirmed by directly correlating presses to the switch's own light-count indicator
+  (bedroom, all 4 states) and cross-confirmed against Bond's own `HassFanSetSpeed`
+  commands (dining + bedroom), which produce byte-identical RF to the wall switch
+  reaching the same target. See "Bond RF audit" below for the full story.
+- **Living room speed, re-verified 2026-08-15 with real-time ground truth (light,
+  power, and 3 of 4 speed states):**
+
+  | Light count | Trailing bits | Confidence |
+  |---|---|---|
+  | off (0%) | `00` | confirmed, 2 independent presses |
+  | 1 light (33%) | `001` | confirmed, 3 independent presses |
+  | 2 lights (66%) | `10` | confirmed, 3 independent presses |
+  | 3 lights (100%) | **undetermined** | see below — reproducibly fails to decode |
+
+  Power (`0xCC`, trailing `0100`) and light (`0xF8`, trailing `1001`) also re-confirmed
+  live, exactly matching the archived 2026-07-29 codes — the archive wasn't mislabeled
+  for those two.
+- **Living room's 100%/"3 lights" state reproducibly fails to auto-decode — living
+  room specifically, not a general 100% issue.** Both dining room (via the Bond audit)
+  and bedroom (both 2026-08-14 and 2026-08-15) decoded their own 100% state cleanly and
+  repeatedly with no trouble. Living room's 100% has failed **3 separate real
+  attempts**, always with a strong, clean signal (SNR 30-35dB, full 25/25 pulses, level
+  not meaningfully different from other presses in the same session that decoded fine —
+  overload was checked and ruled out) — rtl_433's auto-guesser calls it "No clue..."
+  instead of "Manchester coding" like every other code. Pulse and gap width
+  distributions for the failing capture are oddly symmetric (pulse widths ~372µs/760µs,
+  gap widths ~380µs/764µs — nearly mirrored), which may be tripping up the
+  `OOK_MC_ZEROBIT` auto-heuristic specifically for this one bit pattern. Living room
+  also uses a different, shorter trailing-bit scheme than dining/bedroom's shared one
+  (`00`/`001`/`10` vs. `111`/`100`/`1001`/`110`), so whatever's different about this
+  code is specific to living room's own encoding, not the 100% level itself. Needs a
+  dedicated flex decoder or manual pulse-dump decode to resolve — not a capture
+  technique problem, queued as a follow-up, not urgent.
+- Address `0x02` is shared by dining room and bedroom — still not fully explained (see
+  2026-08-14 entry below) but confirmed not to cause practical collisions, since command
+  bytes never overlap between the two switches.
+
 ## The Problem
 
 Three Ashby Park 52" ceiling fans (Model 59252) are controlled through a Bond Bridge in
@@ -88,7 +141,12 @@ first attempt at tuning one (`-X 'n=fansw,m=OOK_PWM,s=330,l=730,r=900,g=900,t=15
 didn't match anything, including on the strongest capture — needs further iteration,
 not yet solved.
 
-### Decoded codes so far
+### Decoded codes so far (superseded — see "Quick reference" table at the top of this file)
+
+**This section is left as historical record of the original 2026-07-29
+characterization. It's stale as of 2026-08-15** — bedroom is now fully decoded, and
+the "trailing bits are jitter" claim below turned out to be wrong (see the 2026-08-15
+entries further down). Use the Quick reference table at the top of this file instead.
 
 All codes share the structure `<16-bit switch address><~10-12 bit command>`. Values
 below are the **stable leading bits**; trailing bits vary run-to-run due to the demod
@@ -180,6 +238,248 @@ itself). Re-pairing was attempted and is incomplete; the remote used for pairing
 partway through from repeated button presses. All 6 automations remain disabled.
 Nothing further can be tested here until Bond can control the fan again — see
 `FAN_WALLSWITCH_SYNC.md`'s Immediate TODO for the current blocking priority order.
+
+## Status update (2026-08-14)
+
+Resumed bedroom-switch troubleshooting in person, Pi physically in the bedroom.
+
+- **Root cause of all prior bedroom capture failures: dead/dying battery in the
+  switch**, not a wrong frequency, gain, or model mismatch. SNR degraded
+  progressively across a session (23dB → ~9dB) even as capture parameters were
+  tuned, which in hindsight tracked a dying battery, not RF tuning. Replacing the
+  battery fixed it immediately — SNR jumped to 30-39dB and captures went from
+  fragmented partial bursts to clean, fully-repeating 25-pulse frames.
+- **FCC filing double-checked and confirmed single-model**: KUJCE10321 covers
+  exactly one device, "CEILING FAN REMOTE CONTROLLER (TRANSMITTER)", model
+  **CE10321**, 304.25MHz, single grant (Dec 2014). No multi-model split in the
+  filing. This supports the user's own recollection (bought as one 3-pack from
+  Home Depot, identical packaging) over the earlier "TR223A is a different SKU"
+  theory — the different button icons noted on 2026-07-29 are most likely a
+  rebadge/label difference on the same CE10321 internals, not a different RF
+  protocol. **304.25MHz is confirmed correct for the bedroom switch too**; no
+  need to keep chasing 303.9MHz.
+- Also found and cleared an unrelated Pi issue: a stuck `rtl_test -t` process
+  (started 2026-08-09, presumably an unkilled `timeout` from a prior session) had
+  been holding the RTL-SDR's USB claim open for 5 days, causing
+  "usb_claim_interface error -6" on any new rtl_433/rtl_test invocation. Killed;
+  no recurrence expected but worth checking `ps aux | grep rtl_433` first if this
+  error shows up again.
+- Capture tuning note: use the **default sample rate (~250 kS/s, i.e. omit `-s`)**
+  for hand-held diagnostic captures, not the deployed script's `-s 2048000`. The
+  wider 2.048MHz capture bandwidth costs ~9dB of noise floor for no benefit on
+  this narrowband OOK signal and was the difference between a 23dB-SNR clean
+  capture and a 9dB-SNR unusable one at otherwise-identical gain/distance.
+- **Bedroom switch, light toggle: decoded, stable across 18 consecutive repeats.**
+  Raw leading bits: `00000000 00000010 01111100` (24 bits, trailing bits per
+  usual jitter). As (addr_hi, addr_lo, command) matching the CODE_TABLE format in
+  `fan_wallswitch_bridge.py`: **`(0x00, 0x02, 0x7C)`**.
+  - Note: the address bytes (`0x00, 0x02`) are identical to the *dining room*
+    switch's address, not the `0x03` the sequential-numbering guess predicted.
+    The command byte (`0x7C`) doesn't collide with any of dining room's three
+    known commands (`0x26`/`0x3C`/`0x3F`), so the CODE_TABLE lookup (matched on
+    the full 3-byte tuple) is still unambiguous — not a blocker, just a sign the
+    16-bit field isn't a simple per-switch sequential ID (possibly a narrower
+    DIP-style selector within a larger fixed word). Not yet fully explained.
+  - Power and speed buttons not yet captured — paused for the night, plan to
+    resume with the same setup (fresh battery already in, 304.25MHz confirmed,
+    default sample rate, `-g 30`, background capture via
+    `nohup timeout 45 rtl_433 -f 304.25M -g 30 -A -R 0 > ~/lightcapture.log 2>&1 &`).
+
+## Status update (2026-08-15)
+
+Resumed bedroom-switch capture (fresh battery still in from 2026-08-14, dongle freed
+again — `rtl-tcp.service`/`rtlamr-mqtt.service` had come back on their own after an
+apparent Pi reboot, since both are `enabled` at boot; stopped manually, may recur after
+any future reboot — worth disabling if the gas-meter services are meant to stay off
+indefinitely).
+
+**Light and power buttons decoded, clean and repeatable:**
+- Light: `(0x00, 0x02, 0x7C)`
+- Power: `(0x00, 0x02, 0x66)`
+- Speed: `(0x00, 0x02, 0x7F)` — see open question below before trusting this one for
+  anything level-specific
+
+All three share address `0x0002`, same as the dining room switch — see the note on this
+in the 2026-08-14 entry above; still unexplained, not yet a practical problem since
+command bytes don't collide.
+
+### Open question: is the speed button's signal relative or absolute? Not yet settled.
+
+Captured a 4-press sequence on the speed button, correlating the switch's own light
+indicator to the decoded RF each time:
+
+| Press | Switch's own light count | Leading 24 bits (addr+cmd) |
+|---|---|---|
+| 1 | 3 | `00000000 00000010 01111111` (0x7F) |
+| 2 | 2 | `00000000 00000010 01111111` (0x7F) |
+| 3 | 1 | `00000000 00000010 01111111` (0x7F) |
+| 4 | 0 (off) | `00000000 00000010 01111111` (0x7F) |
+
+Leading 24 bits (address + command) were bit-identical across all four presses,
+regardless of the switch's own displayed target. Trailing bits (not yet confirmed
+meaningful vs. jitter) did differ: `110`, `1001`, `100`, `111` respectively.
+
+This was initially read as confirming the living-room finding (speed button is a
+relative "advance" command, same code every press, no per-level encoding) — matches
+the already-documented living room behavior. **User pushed back with a real-world
+test**: set the fan to a known speed (3) via Bond, physically confirmed at the fan
+(motor visibly at speed 3) — but the wall switch's own indicator was still at "1" at
+that point (unrelated to Bond, left over from earlier testing). Pressed the switch once
+(indicator 1→0); the real fan turned off, not down to a real speed of 2.
+
+This is consistent with either:
+1. **Relative/stateful**: the fan's receiver tracks its own position independently of
+   Bond (possibly because Bond talks to the fan via the *original bundled remote's*
+   protocol — likely discrete per-speed buttons — while this wall switch is a separate
+   "universal" add-on using its own simple relative-advance protocol; how one receiver
+   arbitrates commands from two different protocols is not actually known, not
+   something to assert further without evidence), and the switch's own generic
+   "advance" pulse only ever drives that internal position, independent of whatever
+   Bond most recently set the real motor to.
+2. **Absolute, encoded in the trailing bits**: the "jitter" bits currently being
+   discarded as demod noise might actually carry the real per-press target and were
+   dismissed too quickly.
+
+**Not settled either way — the fan-behavior test doesn't distinguish between the two
+hypotheses**, since both predict "off" from a switch-side state of "1". Only the RF
+bits (not fan behavior) can settle it, and the trailing-bit comparison hasn't been done
+with a clean, confound-free test yet.
+
+**Trailing-bits test: run 2026-08-15, result reverses the earlier "it's just jitter"
+assumption.** Confound-free (no Bond involved) repeat-state comparison, using an
+independent second session (2026-08-15) against the original capture (2026-08-14) as
+the "same state, different time" comparison instead of two presses in one sitting:
+
+| State | 2026-08-14 trailing bits (total bits) | 2026-08-15 trailing bits (total bits) | Match? |
+|---|---|---|---|
+| 3 lights | `110` (27) | `110` (27) | exact match |
+| 2 lights | `1001` (28) | `1001` (28) | exact match |
+| 1 light | `100` (27) | `100` (27) | exact match |
+| off | `111` (27) | `111` (27) | exact match |
+
+**All four states now confirmed reproducible**, not just 3 of 4.
+
+Bit-for-bit and bit-count identical across two sessions hours apart, different physical
+button presses each time. **This is not consistent with demod jitter** (which should
+vary run to run) — it's reproducible, deterministic per resulting state. The earlier
+"trailing bits are just noise, ignore them" assumption (inherited from the
+living/dining room RE work, `fan_wallswitch_bridge.py`'s doc comment, and this repo's
+own 2026-07-30 notes) **needs to be revisited for all switches, not just bedroom** —
+it was never actually confirmed this rigorously for living/dining, just assumed based
+on the demod's known jittery behavior in general.
+
+Doesn't necessarily mean a clean "absolute speed level" encoding in the sense of a tidy
+binary count (`110`/`1001`/`100`/`111` isn't an obvious binary sequence for 3/2/1/0) —
+but it does mean each button-press outcome carries its own consistent signature, not
+one generic "advance" pulse repeated identically regardless of target. Re-opens the
+question of whether the living/dining automations' "same code every press, so track
+state locally via a counter helper" design (see `FAN_WALLSWITCH_SYNC.md`) is actually
+right, or whether those switches' trailing bits were similarly dismissed too fast.
+
+### Full audit (2026-08-15): replayed all archived captures, all switches, all buttons
+
+Replayed the original 2026-07-29 `~/fan_rf_captures/*.cu8` I/Q files on the Pi through
+`rtl_433 -r <file> -s 2048000 -A -R 0` — no hardware/button presses needed, these are
+the archived captures from the original characterization session. Grouped by button
+across all three switches:
+
+| Button | Living room (addr 0x01) | Dining room (addr 0x02) | Bedroom (addr 0x02) |
+|---|---|---|---|
+| Speed | 1 distinct trailing value seen: `001`/`00` (likely 1-bit-truncated same value across 2 captures) | 2 distinct values: `110`, `1001` | 4 distinct values, confirmed against switch's own light-count indicator: 3→`110`, 2→`1001`, 1→`100`, off→`111` |
+| Power | 2 distinct values: `0100`, `01001` | 2 distinct values: `001001`, `00100` | 2 distinct values: `001001`, `00100` (matches dining exactly) |
+| Light | 1 value, consistent across all captures: `1001` | 1 value, consistent: `01001` | 1 value, consistent (live 2026-08-14/15): `01001` (matches dining) |
+
+**Conclusion: the "trailing bits are jitter" assumption was wrong for every switch,
+not just bedroom.** Power and light are simple two-state toggles and only ever show
+1-2 distinct trailing values (consistent with on/off), which is why they read as
+"stable" in the original characterization — there just wasn't enough variety in the
+samples taken to notice. Speed is the button where this actually matters (4 real
+states), and only bedroom has been tested against real ground truth (the switch's own
+light-count indicator) for all 4 states so far.
+
+**Notable pattern, not yet explained:** bedroom and dining room's trailing values are
+*identical* for both power (`001001`/`00100`) and speed (`110`/`1001` — dining's two
+observed values exactly match bedroom's "3 lights" and "2 lights" states). Bedroom and
+dining also happen to share the same 16-bit address field (`0x0002`, see the
+2026-08-14 entry above). Living room, which has its own distinct address (`0x0001`),
+has its own distinct pair of trailing values that don't overlap with bedroom/dining's.
+This looks like the trailing bits encode a target/direction index that's paired with
+the address field — not a coincidence, not a checksum unique to each switch — but
+unconfirmed; needs more data to be sure the address-sharing and trailing-value-sharing
+aren't independently coincidental.
+
+### Bond RF audit (2026-08-15): Bond uses the exact same protocol — trailing bits fully decoded
+
+Captured 304.25MHz continuously while commanding all three fans/lights through Home
+Assistant's Bond integration (`HassFanSetSpeed`/`HassTurnOn`/`HassTurnOff`), no wall
+switches touched. Findings:
+
+- **Bond transmits the identical Hampton Bay/CE10321 protocol** used by the wall
+  switches — same frequency, same address/command-byte structure, same trailing-bit
+  scheme. Not a different protocol, not IR, not something the receiver has to
+  reconcile from two different sources — it's one protocol, two transmitters. This
+  resolves the "how would the receiver know if it's Bond or the wall switch"
+  question raised earlier — it doesn't need to; there's nothing to distinguish.
+- **The speed button's trailing bits are the absolute target speed, full stop.**
+  `HassFanSetSpeed` calls used the exact same `(address, speed-command-byte)` as the
+  physical speed button, with trailing bits matching the requested percentage exactly,
+  confirmed on both dining room (`0x3F`) and bedroom (`0x7F`):
+
+  | Trailing bits | Speed |
+  |---|---|
+  | `111` | Off (0%) |
+  | `100` | 33% |
+  | `1001` | 66% |
+  | `110` | 100% |
+
+  This matches bedroom's ground-truth-confirmed values from earlier in this session
+  exactly. **The original hypothesis (each press sends a specific target-speed code,
+  not a generic "advance" pulse) was correct.** The `counter`-helper design in
+  `FAN_WALLSWITCH_SYNC.md`, built on the opposite assumption, needs to be replaced with
+  direct decode-to-percentage logic — no local state tracking needed at all, for any
+  of the three switches.
+- **Living room's plain `HassTurnOn`/`HassTurnOff` (no percentage) triggered the
+  power-toggle code (`0xCC`, address `0x01`) instead of a speed-family code.**
+  Dining/bedroom's plain `HassTurnOff` used the speed-family "off" code (trailing
+  `111`) instead of their own power-toggle codes (`0x26`/`0x66`). So which code path
+  Bond uses depends on the HA service called and/or that fan's individual Bond
+  configuration — not yet explained, and living room is also the one switch with a
+  known-broken Bond pairing, so may not be representative. Worth re-checking once
+  living room's Bond pairing is fixed.
+- Light toggle (dining `0x3C`, bedroom `0x7C`) sent the identical code for both on and
+  off — a pure toggle, no separate on/off codes, consistent with the single stable
+  trailing value seen for light in the earlier full-switch audit.
+- Confirmed via real captured RF (not just HA's reported success) that the end-of-test
+  cleanup commands (all fans/lights off) actually transmitted and landed correctly.
+
+**Remaining next steps:**
+- ~~Work out what the trailing bits actually encode structurally~~ — **solved by the
+  Bond RF audit below**: trailing bits are the absolute target speed percentage.
+- **Re-record dining room (and living room) button presses with real-time ground
+  truth, not just replay the July 29 archives (queued, not urgent).** The archived
+  `.cu8` files have no logged record of which physical button/state each file
+  corresponds to beyond the directory name (`diningroom_speed/g001...`, etc.) — that
+  labeling was done live in the original session and could have a mistake (wrong
+  button pressed, or button pressed at an unrecorded/unexpected state). The
+  living/dining "known good" code table has been treated as ground truth throughout
+  this project, including for the address-sharing and trailing-bits-match findings
+  above — worth confirming with the same rigorous method used for bedroom (correlate
+  each press to the switch's own observed state in real time) before leaning on it
+  further, especially since the bedroom/dining trailing-value match is a load-bearing
+  clue for the address-sharing theory.
+- The `counter` helper design in `FAN_WALLSWITCH_SYNC.md`, which assumes the speed
+  button sends one generic code and so needs a locally-tracked counter to know the
+  resulting state, was built on the same now-disproven "jitter" assumption for
+  living/dining, not just bedroom — needs reconsideration for all three switches, not
+  just bedroom's automation design (which doesn't exist yet).
+
+**Second proposed test (user, not yet run), on the Bond side rather than the RF side:**
+set the fan to a known state using *only* the wall switch, then command Bond to a
+specific speed. If the real fan state was already out of sync with whatever Bond
+internally believes/tracks, the Bond command should fail to reach the intended target
+speed. Useful for probing whether Bond's own speed-setting logic is itself
+relative/assumed-state-based (in which case it's just as vulnerable to desync as the
+wall-switch automations this whole project is trying to fix) or genuinely absolute.
 
 ## Next Steps
 
