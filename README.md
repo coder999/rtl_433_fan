@@ -12,7 +12,7 @@ absolute target speed; see notes below the table.
 
 | Room | Address | Power toggle | Light toggle | Speed command byte | Off (0%) | 33% | 66% | 100% |
 |---|---|---|---|---|---|---|---|---|
-| Living room | `0x01` | `0xCC` | `0xF8` | `0xFF` | not confirmed (see below) | trailing `00` | trailing `001` | trailing `10` |
+| Living room | `0x01` | `0xCC` | `0xF8` | `0xFF` | 2-bit counter `11` (custom decoder) | counter `00` | counter `01` | counter `10` |
 | Dining room | `0x02` | `0x26` | `0x3C` | `0x3F` | trailing `111` | trailing `100` | trailing `1001` | trailing `110` |
 | Master bedroom | `0x02` | `0x66` | `0x7C` | `0x7F` | trailing `111` | trailing `100` | trailing `1001` | trailing `110` |
 
@@ -50,10 +50,34 @@ Notes:
   **`10` — previously logged as a stuck-at-66%/decode-failure situation — is simply the
   correct, cleanly-decoding 100%/HIGH code.** It was captured dozens of times across
   this whole session, always readable, always "Manchester coding." There was no
-  decode failure. The genuinely open item is the **speed-family "off" code**, which
-  Bond's 0% never sends (it uses the power-toggle path instead) — lower priority than
-  it seemed, since power-toggle already covers off functionally; would still need a
-  live physical-button test to pin down if ever needed.
+  decode failure for 100%.
+
+  **RESOLVED (2026-08-15, same day, later still): the "off" code decode failure was
+  real, but it's now fully solved.** Auto-guesser fails on it every time ("No clue...",
+  4/4 attempts) despite a clean strong signal, but bypassing the auto-guesser with an
+  explicit flex decoder cracked it: `-X 'n=off,m=OOK_PWM,s=748,l=364,r=900,g=900,
+  t=150,y=0'` (pulse widths tuned from the raw capture's own measured 372/760µs, with
+  short/long swapped relative to the naive guess) decodes every state — not just
+  off — cleanly and consistently. Ran all four speeds through this same decoder for a
+  fully apples-to-apples comparison (autonomously, via Bond, no physical presses):
+
+  | State | Code |
+  |---|---|
+  | 33% | `0003fe0` |
+  | 66% | `0003fe8` |
+  | 100% | `0003ff0` |
+  | off | `0003ff8` |
+
+  **Clean structure**: every state shares an identical prefix (address `0x01` +
+  command `0xFF`, matching every other decode in this project), and the codes differ
+  *only* in their last 2 bits — a simple binary counter: `00`→33%, `01`→66%,
+  `10`→100%, `11`→off. This is a cleaner, more clearly-structured decode than the
+  variable-length "trailing bits" reported from the auto-Manchester path for the other
+  three states — those were the same underlying counter, just obscured by the
+  auto-guesser's inconsistent per-capture framing/jitter. Best guess at why only `11`
+  (off) broke the auto-guesser: it's the one state where both counter bits are set,
+  which likely interacts differently with the `OOK_MC_ZEROBIT` heuristic than the
+  other three. Living room's speed decode is now **fully solved, no open items**.
 
   Power (`0xCC`, trailing `0100`) and light (`0xF8`, trailing `1001`) were correctly
   identified in the original real-time test and remain confirmed, matching the archived
