@@ -1,0 +1,15 @@
+[Unit]
+Description=rtl_433 to MQTT bridge
+After=network-online.target
+Wants=network-online.target
+Conflicts=rtlamr-mqtt.service rtl-tcp.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/meter-mqtt
+ExecStart=/usr/local/bin/rtl433-mqtt.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
