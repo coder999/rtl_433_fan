@@ -496,9 +496,36 @@ USB dongle or a remote `rtl_tcp` source (the Pi, in this household's case).
 
 As of 2026-08-16: fully built (11 code tasks, TDD throughout, 60 tests), deployed to
 this HA instance, and dry-run validated against all 9 real wall-switch button
-combinations with zero mismatches. **Not yet live** - the pipeline documented above in
-this file (MQTT + the 9 HA automations + `fan_wallswitch_bridge.py` on the Pi) remains
-the active, working system and safety net until the new add-on completes live
-validation (real Bond corrections, not just dry-run logging) and a deliberate cutover.
-Nothing in this file's setup needs to change or be trusted less until that cutover
-actually happens.
+combinations with zero mismatches.
+
+## ✅ CUTOVER COMPLETE (2026-08-16)
+
+Live validation (real Bond corrections, `dry_run: false`) then passed all 9
+combinations with zero errors and zero double-RF responses - same rigor as the
+2026-08-15 dry-run pass, this time actually writing to Bond. Cutover executed
+immediately after:
+
+1. **The 9 "Fan wall switch" HA automations are now disabled** (via the UI toggle,
+   entity registry `disabled_by` - not deleted, not the broken YAML `enabled:` key).
+   The 3 "remember last speed" automations (`010`-`012`) were left as-is per the
+   plan's scope - they're now vestigial (their `input_number` helpers are unused by
+   the new add-on, which has its own internal last-speed store) but harmless.
+2. **The Pi's role is now just `rtl-tcp.service`**, reconfigured to bind `0.0.0.0`
+   (was `127.0.0.1`-only) and made permanent (`enable --now`). `rtl433-mqtt.service`
+   and `fan_wallswitch_bridge.py`'s job are retired - `rtl433-mqtt.service` is
+   `disable --now`'d but the unit file and script remain in this repo for history.
+3. **`bond-rtl433-rf-sync`** (in `coder999/tuttleHAaddons`) is now the sole thing
+   correcting Bond's believed fan/light state from wall-switch RF, running
+   continuously against the Pi's `rtl_tcp` stream, `boot: auto`.
+
+One operational note carried forward from the plan's Global Constraints, still true
+after cutover: the Pi's single SDR dongle is still shared with the unrelated gas-meter
+project (`rtlamr-mqtt.service`, also via `rtl-tcp.service`) - `rtl_tcp` only serves one
+client at a time, so the fan add-on and gas-meter reading still can't both be actively
+connected simultaneously. That's an unchanged, pre-existing limitation of this
+household's single-dongle setup, not a regression from this cutover.
+
+This file's setup section above (MQTT topics, the bridge script, the 9+3 automations,
+`rest_command`) is now **historical** - accurate as a record of how this problem was
+first solved, but no longer the live system. See `coder999/tuttleHAaddons`'s
+`bond-rtl433-rf-sync/` for the current implementation.
