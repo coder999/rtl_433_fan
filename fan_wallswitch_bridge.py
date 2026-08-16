@@ -44,6 +44,12 @@ CODE_TABLE = {
     0x1FF: ("livingroom", "speed"),
     0x27F: ("diningroom", "speed"),
     0x2FF: ("bedroom", "speed"),
+    0x1F9: ("livingroom", "light"),
+    0x279: ("diningroom", "light"),
+    0x2F9: ("bedroom", "light"),
+    0x1D9: ("livingroom", "power"),
+    0x259: ("diningroom", "power"),
+    0x2D9: ("bedroom", "power"),
 }
 
 # Trailing-edge debounce: a held button re-transmits the same code repeatedly with
