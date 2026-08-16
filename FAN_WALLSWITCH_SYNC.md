@@ -257,3 +257,84 @@ Rough priority order — **everything below is blocked on the first item**:
     command should fail to land on the intended real speed. Would show whether Bond's
     own speed-setting logic is itself relative/assumed-state-based (equally vulnerable
     to the desync problem this whole project exists to fix) or genuinely absolute.
+
+## v2 implementation session (2026-08-15 evening): executed, then hit a real blocker
+
+Executed the plan at `rtl_433_fan/docs/superpowers/plans/2026-08-15-fan-wallswitch-sync-v2.md`
+end to end through Task 6 (bridge script rewrite using the validated `-X OOK_PWM`
+decoder, full 9-entry CODE_TABLE, new automations replacing the counter-helper design,
+old counters removed). Task 7 (enable + live-validate one at a time) surfaced a real
+architectural problem that blocked completion. Full account below; **a fresh,
+self-contained plan for resuming tomorrow is at
+`docs/superpowers/plans/2026-08-16-bond-tracked-state.md`** — read that first, this
+section is background/history, not instructions.
+
+**Bug found while enabling automations:** all 9 new automations initially showed as
+`unavailable` in HA (never fired, red warning badge). Root cause: an explicit
+`enabled: true`/`enabled: false` key in automation YAML is not handled correctly by
+this HA version (2026.8.2) - confirmed by diffing against a UI-created test automation
+in the same file (which had no `enabled:` key and loaded fine). Fix: removed the
+`enabled:` key from all 9 (and the 3 "remember last speed" automations added later);
+they now default to on, so per-automation enable/disable has to happen some other way
+if needed (entity registry `disabled_by`, not the YAML key).
+
+**Bigger bug found during the first live test:** enabling the automations (which used
+`fan.toggle`/`light.toggle`/`fan.turn_on` — the same services a normal Bond-app control
+uses) caused a real, disruptive infinite on/off loop on a physical light. Root cause:
+**Bond transmits the identical RF protocol as the wall switches** (established earlier
+this session, "Bond RF audit" in the `rtl_433_fan` README) — so calling a normal Bond
+control service in response to a detected wall-switch press makes Bond transmit RF that
+looks, to our own always-on RF receiver, exactly like a new physical press. That
+re-triggers the automation, which calls the service again, which transmits again.... On
+top of the software loop, there's a **physical correctness problem independent of our
+own receiver**: since power/light are pure toggle pulses at the RF level (not
+"set to explicit state"), the real device receiver toggles again on the redundant Bond
+command, undoing the user's actual press, regardless of whether anything is listening.
+
+**Attempted fix (2026-08-15 night): Bond's "tracked state" services.** Researched and
+confirmed (Bond's own Local API docs, HA's Bond integration docs, and the `bond-async`
+library source) that Bond has a dedicated mechanism for exactly this: `PATCH
+/v2/devices/<id>/state` (the same one Bond's own mobile app uses for its "Fix Tracked
+State" feature) updates Bond's belief about a device's state **without transmitting
+any RF**. HA exposes this as `bond.set_fan_speed_tracked_state` and
+`bond.set_light_power_tracked_state`. Rewrote all 9 automations to call these instead
+of `toggle`/`turn_on`, added 3 new `input_number` helpers (`<room>_last_fan_speed`)
+plus 3 new automations to keep them accurate (state-triggered on each fan's percentage
+attribute becoming non-zero), so the power-toggle automation can resume the fan to its
+real last speed on power-on, matching the physical fan's own confirmed
+resume-last-speed behavior (tested live on the bedroom fan tonight: powered on from
+fully off, real fan resumed at its last speed, not a fixed default). All of this
+deployed and structurally validated (YAML, `ha core check`, byte-diff against what was
+tested).
+
+**Live-tested via the automation editor's "Run" action (bypasses the RF/MQTT trigger
+path entirely, so didn't need the Pi, which was already turned off for the night):
+`bond.set_light_power_tracked_state` still caused a real, physical light to turn on.**
+This contradicts every source consulted (Bond's own docs, HA's service description,
+the `bond-async` library's routing logic, which does correctly route the
+`SET_STATE_BELIEF` action to `PATCH /state` not `/actions/`). The deployed YAML was
+verified correct (right service name, right entity, right template) via direct
+inspection of the live file - not a typo or config mistake on the implementation side.
+Root cause not yet found. **Stopped live testing for the night after this — two real
+physical disruptions in one evening is enough; further blind testing needs a safer,
+more isolated diagnostic approach, not more guessing against real devices.**
+
+**New resource for tomorrow:** the user installed a dedicated Bond MCP tool overnight,
+authenticated directly against the Bond Bridge's local API (key sourced via 1Password),
+independent of Home Assistant's integration layer entirely. This should let tomorrow's
+session test Bond's *actual* local API behavior directly - isolating whether the bug is
+in HA's Bond integration's translation layer, or in Bond's own firmware/API not
+honoring the belief-only semantics its docs describe for this device/action
+combination. Also worth checking: the Bond app's Advanced Settings has both **"Fix
+Tracked State"** (manual one-off correction, tap-through UI) and **"Trust Tracked
+State"** (toggle, confirmed ON in this account already - "the Bond Bridge will not
+transmit the toggle command if the device is already in the desired state") - the
+latter is a different mechanism (transmission-skipping based on belief match, not a
+dedicated no-transmit write path) and may be worth understanding fully before
+concluding tomorrow's local-API test is a clean apples-to-apples comparison.
+
+**State left overnight:** `rtl433-mqtt.service` on the Pi is **stopped** (not just the
+Pi being off) - this was deliberate, to break the feedback loop, and should stay
+stopped until the tracked-state bug is actually resolved. All 12 new/rewritten
+automations are enabled in HA, but harmless while the service is stopped, since nothing
+publishes to the MQTT topics they trigger on without it running.
