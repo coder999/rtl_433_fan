@@ -338,3 +338,108 @@ Pi being off) - this was deliberate, to break the feedback loop, and should stay
 stopped until the tracked-state bug is actually resolved. All 12 new/rewritten
 automations are enabled in HA, but harmless while the service is stopped, since nothing
 publishes to the MQTT topics they trigger on without it running.
+
+## ✅ RESOLVED (2026-08-16): root cause found, fix deployed, all 9 automations live-validated
+
+Executed `docs/superpowers/plans/2026-08-16-bond-tracked-state.md` end to end. Summary
+for anyone who doesn't need the full plan file's detail:
+
+**Root cause of the tracked-state bug:** confirmed via direct comparison - Bond's own
+raw local API (`PATCH /v2/devices/<id>/state`, same mechanism as the app's "Fix Tracked
+State") genuinely does not transmit RF (re-confirmed 2026-08-15 night on the bedroom
+fan, both via the Bond app's UI and a raw API call). **HA's
+`bond.set_fan_speed_tracked_state` / `bond.set_light_power_tracked_state` services do
+transmit real RF**, contradicting their own documentation - the bug is specifically in
+HA's Bond integration layer (exact line of HA integration source not identified; not
+needed once the working alternative was confirmed).
+
+**Fix: bypass HA's Bond integration entirely.** Added to the HA host's
+`/config/configuration.yaml`:
+```yaml
+rest_command:
+  bond_set_state:
+    url: "http://192.168.0.110/v2/devices/{{ device_id }}/state"
+    method: PATCH
+    headers:
+      BOND-Token: !secret bond_token
+      Content-Type: "application/json"
+    payload: "{{ body }}"
+```
+(`bond_token` added to `/config/secrets.yaml`, sourced from 1Password
+`op://CLI/bond-bridge-local/credential` - see `bond_api.md` in this repo for the full
+raw-API reference.) Rewrote all 9 "Fan wall switch" automations
+(`1786000000001`-`009`) to call `rest_command.bond_set_state` instead of the broken
+tracked-state services, converting the wall switch's percentage payloads (0/33/66/100)
+to Bond's native 1-3 speed-step range (all three fans confirmed `max_speed: 3` via
+`GET .../properties`). `rest_command` doesn't hot-reload, so this required one HA Core
+restart (explicit user go-ahead obtained first, per the standing constraint from last
+night).
+
+**Second, unrelated bug found and fixed along the way:** the user renamed all fan/light
+entities the night before (2026-08-15) for naming consistency but the rename never made
+it into `automations.yaml`. Automations `1,2,4,5` (the Bond-calling ones) and `10,11`
+(the livingroom/diningroom "remember last speed" trackers) still referenced the old,
+now-nonexistent entity_ids (`fan.living_room_living_room_ceiling_fan`,
+`fan.dining_room_ceiling_fan_2`, `light.dining_room_ceiling_fan`), which silently broke
+their `is_state()`/condition checks - always-false conditions, so e.g. the power toggle
+would never correctly detect "currently on." Bedroom was unaffected (its entity_ids
+didn't change in the rename). Fixed via global string replacement, re-validated
+structurally, redeployed, confirmed via live HA state queries. **Current correct
+entity_ids:**
+
+| Room | HA fan entity_id | HA light entity_id | Bond device_id |
+|---|---|---|---|
+| Living room | `fan.living_room_ceiling_fan` | `light.living_room_ceiling_fan` | `ce4d90389da6937f` |
+| Dining room | `fan.dining_room_ceiling_fan` | `light.dining_room_ceiling_fan_light` | `33c72108a1a2548d` |
+| Bedroom | `fan.master_bedroom_ceiling_fan` | `light.master_bedroom_ceiling_fan` | `3e9252a7323111d2` |
+
+One more stale automation was found with the same old entity_id (`1779048188186`,
+"Dining Room Scene 2 Cycle Fan Speed", an unrelated Z-wave scene-controller automation)
+- **left untouched, out of scope for this plan**, but it's almost certainly also broken
+by the same rename and worth fixing separately.
+
+**Operational gotcha found on the Pi:** starting `rtl433-mqtt.service` after it's been
+stopped a while can stall for up to ~90 seconds if `rtl-tcp.service` (the unrelated
+gas-meter project's RTL-SDR server) is running - the unit's `Conflicts=` directive
+correctly triggers a stop of `rtl-tcp.service`, but that service didn't respond to
+SIGTERM promptly and had to wait out systemd's default `TimeoutStopSec` before being
+force-killed. `rtl433-mqtt.service` crash-loops with `status=2/INVALIDARGUMENT` (device
+busy) every ~10s during that window - benign, just wait it out.
+
+**False-positive RF trigger on startup:** immediately after `rtl433-mqtt.service` came
+up, it fired one spurious `livingroom/power` event with no real button press - most
+likely an SDR power-on/PLL-lock transient (matches a "PLL not locked!" warning logged by
+`rtl_tcp` earlier). This flipped Bond's believed living room fan state to
+on/100% while the physical fan was actually off. Caught by checking physical state
+against belief before starting the room-by-room test, corrected via a raw no-RF PATCH.
+**Worth treating the first event after any service (re)start with suspicion** - verify
+against physical reality before trusting it.
+
+**All 9 automations live-validated one at a time** (real physical wall-switch presses,
+watching both the physical device and HA's believed state each time): living room
+speed/power/light, dining room power/speed/light, bedroom power/speed/light. **Zero
+false RF transmissions, zero double-toggles observed anywhere.** One live mismatch was
+found and diagnosed as a known, pre-existing, self-healing limitation rather than a new
+bug: bedroom's `input_number.bedroom_last_fan_speed` helper had gone stale (held `66`
+from a manual seed value on 2026-08-15, while the fan's real speed had drifted to `33`
+through some path outside RF tracking) - this only affects what percentage the
+power-toggle automation resumes to, and self-corrects the next time a genuine non-zero
+wall-switch speed press comes in (confirmed live: pressing bedroom speed to 100%
+refreshed the helper to `100` immediately). Not fixed further - it's inherent to the
+"remember last real speed" design and documented as such in `input_numbers.yaml`'s
+comments.
+
+**Correction to a misconception baked into the original automation descriptions:** the
+phrase "not wired to Bond" (used to describe the light-only wall switch buttons)
+suggested those buttons might not actually control the physical fixture. Live testing
+confirmed this is **not true** - all three room's light-only buttons, like the
+power and speed buttons, directly and reliably control the physical light via RF (same
+304.25MHz protocol as everything else in this project). The one apparent mismatch
+during testing (living room light didn't change on a press) was a one-off RF reception
+miss, immediately reproduced-away by pressing again - not a hardware/wiring limitation.
+The phrase should be read as "Bond has no visibility into this button" (true, and the
+whole reason this project exists), not "this button has no physical effect."
+
+**Final state:** `rtl433-mqtt.service` running and healthy on the Pi, all 9
+automations enabled and live-validated, no known blockers. This closes out the
+tracked-state bug that blocked the 2026-08-15 session.

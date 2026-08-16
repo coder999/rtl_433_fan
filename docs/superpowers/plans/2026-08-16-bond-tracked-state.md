@@ -100,8 +100,8 @@ toggles the device again, undoing the user's actual press.
 | Room | HA fan entity_id | HA light entity_id | Bond device_id |
 |---|---|---|---|
 | Living room | `fan.living_room_living_room_ceiling_fan` | `light.living_room_living_room_ceiling_fan` | `ce4d90389da6937f` (confirmed) |
-| Dining room | `fan.dining_room_ceiling_fan_2` | `light.dining_room_ceiling_fan` | one of `3e9252a7323111d2` / `33c72108a1a2548d` - **not yet identified, do this first (Task 1)** |
-| Bedroom | `fan.master_bedroom_ceiling_fan` | `light.master_bedroom_ceiling_fan` | one of `3e9252a7323111d2` / `33c72108a1a2548d` - **not yet identified, do this first (Task 1)** |
+| Dining room | `fan.dining_room_ceiling_fan_2` | `light.dining_room_ceiling_fan` | `33c72108a1a2548d` (confirmed 2026-08-16 via Bond MCP `get_device_info`) |
+| Bedroom | `fan.master_bedroom_ceiling_fan` | `light.master_bedroom_ceiling_fan` | `3e9252a7323111d2` (confirmed 2026-08-16 via Bond MCP `get_device_info`) |
 
 Bond Bridge local API: `http://192.168.0.110`, API v2, firmware v4.34.1. Device list
 and read-only `GET` calls need no auth (confirmed working via plain `curl` on
@@ -133,7 +133,7 @@ this screen), screenshotted by the user 2026-08-15 night:
 
 **Files:** none - read-only API exploration.
 
-- [ ] **Step 1: Check what the new Bond MCP tool exposes**
+- [x] **Step 1: Check what the new Bond MCP tool exposes**
 
 Search for it (it wasn't available in the prior session, should be now):
 ```
@@ -141,7 +141,13 @@ ToolSearch(query="bond", max_results=10)
 ```
 Load whatever's found and read its description before using it.
 
-- [ ] **Step 2: Get device names for the two unidentified IDs**
+Confirmed available 2026-08-16: `get_device_state`, `get_device_info`, `list_devices`,
+`get_bridge_info`, `set_fan_speed`, `set_fan_direction`, `set_light_brightness`,
+`toggle_device_power`, `send_custom_action`, `control_shades`. **No dedicated
+no-RF/tracked-state write tool** - only real control actions plus reads. Confirms
+Task 3 will likely need raw `curl` PATCH with the Bond token, as the plan anticipated.
+
+- [x] **Step 2: Get device names for the two unidentified IDs**
 
 Either via the Bond MCP tool, or fall back to plain curl (confirmed working
 unauthenticated for reads 2026-08-15):
@@ -153,7 +159,7 @@ Each response has a `"name"` field (e.g. `"Living Room Ceiling Fan"` was confirm
 for `ce4d90389da6937f` this way) - match against "Dining Room Ceiling Fan" / "Master
 Bedroom Ceiling Fan" to identify which ID is which.
 
-- [ ] **Step 3: Record the mapping**
+- [x] **Step 3: Record the mapping**
 
 Update the table in this file's Background section (or just keep the mapping in your
 working notes for the rest of this session - not critical to persist further unless
@@ -165,26 +171,17 @@ this plan gets re-run another day).
 
 **Files:** none - manual verification with the user, in the Bond app.
 
-- [ ] **Step 1: Ask the user to test "Fix Tracked State" themselves, in the Bond app**
+- [x] **Step 1: Ask the user to test "Fix Tracked State" themselves, in the Bond app**
 
-Pick one light (suggest dining room, untouched by last night's testing). In the Bond
-app: select the device → Settings → Advanced → Fix Tracked State → move the slider
-to a state that's the *opposite* of the light's current real state → Save. Ask the
-user to confirm: did the physical light respond at all, or only the app's displayed
-state change?
+Already done 2026-08-15 night (bedroom, not dining room, but same conclusion):
+user confirmed Fix Tracked State in the Bond app does not move the physical fan.
 
-- [ ] **Step 2: Interpret the result**
+- [x] **Step 2: Interpret the result**
 
-If the physical light did **not** respond: good, this confirms Bond's own
-documented no-RF write path genuinely exists and works on this account/firmware -
-the bug from last night is specifically in HA's integration layer or in how it's
-being called, not a fundamental Bond limitation. Proceed to Task 3 to find the
-HA-side bug.
-
-If the physical light **did** respond even via Bond's own native app feature: this
-is a deeper problem (firmware behavior, or a setting like "Trust Tracked State"
-interacting unexpectedly) that HA-side changes can't fix - stop and reconsider the
-whole approach with the user rather than continuing this plan's remaining tasks.
+Physical light did **not** respond: confirms Bond's own documented no-RF write path
+genuinely exists and works on this account/firmware - the bug is specifically in
+HA's integration layer or in how it's being called, not a fundamental Bond
+limitation.
 
 ---
 
@@ -194,40 +191,15 @@ whole approach with the user rather than continuing this plan's remaining tasks.
 
 **Only proceed here if Task 2 confirmed Bond's own no-RF path works.**
 
-- [ ] **Step 1: Pick one already-identified device (living room, ID `ce4d90389da6937f`) and get its current real state**
+- [x] **Step 1-3: Bedroom fan tested directly against the raw local API 2026-08-15 night**
 
-```bash
-curl -s "http://192.168.0.110/v2/devices/ce4d90389da6937f/state"
-```
-Note the current `light` value (0 or 1).
-
-- [ ] **Step 2: With the user watching the physical light, PATCH the state directly**
-
-Use the Bond MCP tool if it has a state-write capability; otherwise construct the
-raw call (needs the Bond local token - check the MCP tool's config or ask the user
-where it's stored, don't guess or try to extract it from 1Password yourself):
-```bash
-curl -s -X PATCH "http://192.168.0.110/v2/devices/ce4d90389da6937f/state" \
-  -H "BOND-Token: <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"light": <opposite of what Step 1 showed>}'
-```
-
-- [ ] **Step 3: Ask the user to confirm: did the physical light respond?**
-
-If **no physical response** and the `GET .../state` call afterward shows the belief
-updated: the raw local API works correctly, confirming the bug is specifically in
-HA's Bond integration layer (or in how the automations called it). Proceed to Task 4
-to fix the automations to call the local API directly instead of going through HA's
-`bond.set_*_tracked_state` services.
-
-If the physical light **did** respond: the raw API itself is transmitting despite
-its documented behavior - this means Task 2's "Fix Tracked State" test and this raw
-API test are hitting different code paths, or there's a request-format detail this
-plan is missing (e.g. maybe the JSON body needs additional fields, or the device
-needs to be addressed differently for combo CF+light devices specifically). Stop and
-investigate the exact request Bond's own app makes (proxy/inspect if possible) rather
-than guessing further.
+User confirmed: raw Bond local API `PATCH /v2/devices/<id>/state` does **not** move
+the physical fan, while HA's `bond.set_*_tracked_state` services **did** transmit
+real RF. This is the clean signal Task 3 needed - the bug is confirmed to be in HA's
+Bond integration layer, not Bond's own local API. Full working method (token
+location, field names, worked examples) is now documented in `bond_api.md` in this
+repo. **Branch B confirmed: automations need to call the raw local API directly,
+bypassing HA's Bond integration entirely.**
 
 ---
 
@@ -249,7 +221,7 @@ than guessing further.
   automations, so a `rest_command:`/`shell_command:` is the realistic path if the fix
   requires bypassing HA's Bond integration).
 
-- [ ] **Step 1: Based on Task 3's finding, decide the exact fix**
+- [x] **Step 1: Based on Task 3's finding, decide the exact fix**
 
 This step can't be fully scripted in advance since it depends on Task 3's result.
 Two likely branches:
@@ -285,19 +257,19 @@ Then each automation's action becomes e.g.:
 Adjust exact field names (`light`, `power`, `speed`) to match what Task 3's raw
 `GET .../state` calls showed for each device.
 
-- [ ] **Step 2: Validate structurally before deploying**
+- [x] **Step 2: Validate structurally before deploying**
 
 Same pattern as every other edit this project: pull the file locally, parse with
 `python3 -c "import yaml; ..."`, confirm exactly 9 (or however many changed) automations
 match the expected new structure, no `enabled:` key anywhere, no duplicate ids, other
 automations (`airplay_indoor_start`, `nexus_mqtt_summary_publisher`, etc.) untouched.
 
-- [ ] **Step 3: Get explicit user confirmation, then deploy**
+- [x] **Step 3: Get explicit user confirmation, then deploy**
 
 Deploy via `scp`, run `ha core check`, confirm the auto-commit
 (`ssh ha "cd /config && git log --oneline -3"`).
 
-- [ ] **Step 4: One isolated live test before trusting it broadly**
+- [x] **Step 4: One isolated live test before trusting it broadly**
 
 Same method as Task 3 Step 2 - use the automation editor's "Run" action on ONE
 automation (suggest the dining room light toggle, lowest stakes) with the user
@@ -313,21 +285,21 @@ update.
 
 **Only proceed here once Task 4's isolated test passes clean.**
 
-- [ ] **Step 1: Turn the Pi back on if it isn't already, confirm no stale processes**
+- [x] **Step 1: Turn the Pi back on if it isn't already, confirm no stale processes**
 
 ```bash
 ssh raspberrypi 'ps aux | grep -i rtl | grep -v grep'
 ```
 Should be empty (or only unrelated processes like the gas-meter project's `jq`).
 
-- [ ] **Step 2: With explicit user go-ahead, start the bridge service**
+- [x] **Step 2: With explicit user go-ahead, start the bridge service**
 
 ```bash
 ssh raspberrypi 'sudo systemctl start rtl433-mqtt.service && sleep 2 && systemctl is-active rtl433-mqtt.service'
 ssh raspberrypi 'journalctl -u rtl433-mqtt.service -n 20 --no-pager'
 ```
 
-- [ ] **Step 3: One real physical wall-switch press per automation, one at a time, watching logs and the physical device each time**
+- [x] **Step 3: One real physical wall-switch press per automation, one at a time, watching logs and the physical device each time**
 
 Order: living room speed (this one was mid-test when the tracked-state bug was found
 last night, do it first), then the remaining 8, same room-by-room order as before.
@@ -337,7 +309,7 @@ the Pi (`ssh raspberrypi 'journalctl -u rtl433-mqtt.service -f'`), confirm via
 device did **not** additionally respond to *our* correction (only to the original
 press).
 
-- [ ] **Step 4: Update `FAN_WALLSWITCH_SYNC.md` with the resolution**
+- [x] **Step 4: Update `FAN_WALLSWITCH_SYNC.md` with the resolution**
 
 Document what Task 3's diagnosis found (root cause of the tracked-state bug) and
 confirm all 9 automations are validated live. Commit and push from
