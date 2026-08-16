@@ -488,8 +488,7 @@ diagnostics like this again.
 
 The simplification idea above is being built for real, as a proper Home Assistant
 add-on rather than a Pi-side script: **`bond-rtl433-rf-sync`** in the
-`coder999/tuttleHAaddons` repo (design spec, implementation plan, and full session
-history in that repo's `docs/superpowers/`). It absorbs the Pi's decode/match/debounce
+`coder999/tuttleHAaddons` repo. It absorbs the Pi's decode/match/debounce
 logic plus the belief-only Bond correction directly into one self-contained add-on -
 no MQTT, no HA automations, no `rest_command` - configurable to run against a local
 USB dongle or a remote `rtl_tcp` source (the Pi, in this household's case).
@@ -529,3 +528,13 @@ This file's setup section above (MQTT topics, the bridge script, the 9+3 automat
 `rest_command`) is now **historical** - accurate as a record of how this problem was
 first solved, but no longer the live system. See `coder999/tuttleHAaddons`'s
 `bond-rtl433-rf-sync/` for the current implementation.
+
+**Follow-up cleanup (2026-08-16):** the 12 disabled/vestigial automations and 3
+`input_number.*_last_fan_speed` helpers were removed from `automations.yaml` /
+`input_numbers.yaml` (validated with `ha core check`, one HA Core restart to apply
+the `configuration.yaml` change). Their entity registry entries didn't disappear
+automatically - HA leaves orphaned `unavailable` entities behind when config is
+removed - so those were deleted manually via Settings → Devices & Services →
+Entities (filter: Unavailable). Confirmed zero `fan_wall_switch`/`last_fan_speed`
+entities remain anywhere in HA's live state. Nothing in this household's HA config
+references the old pipeline anymore.
