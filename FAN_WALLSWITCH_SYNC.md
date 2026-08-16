@@ -443,3 +443,43 @@ whole reason this project exists), not "this button has no physical effect."
 **Final state:** `rtl433-mqtt.service` running and healthy on the Pi, all 9
 automations enabled and live-validated, no known blockers. This closes out the
 tracked-state bug that blocked the 2026-08-15 session.
+
+## Future simplification idea (not implemented, thought experiment 2026-08-16)
+
+Discussed removing HA/MQTT from this pipeline entirely and having the Pi's
+`fan_wallswitch_bridge.py` call Bond's local API directly (belief-only `PATCH
+.../state`, never a real action) on each decoded press - "Bond as single source of
+truth." This would remove MQTT, the 9-12 HA automations, and `rest_command` from the
+picture; HA's Bond integration would become a pure passive consumer of Bond's belief
+for the UI/voice/other automations instead of an active participant correcting it.
+Not implemented - current design works and isn't broken, this is optional future
+cleanup, not a fix.
+
+**One open question got resolved empirically while discussing it:** does the physical
+fan itself remember its last real speed, or does that memory live in the wall switch
+(which would make a Pi-direct-to-Bond design unable to replicate correct resume-on-power
+behavior without its own speed tracking, same as today's `input_number` helpers)?
+Tested live on the bedroom fan, entirely through Bond's real (transmit-type) API
+actions - **never touching the wall switch at any point**, ruling out "switch
+remembers" as an explanation:
+1. Real `SetSpeed` action → 33%, confirmed physically.
+2. Real `TurnOff` action, confirmed physically off.
+3. Real bare `TurnOn` action (**no speed argument**) → fan confidently confirmed back
+   at 33%, not some other/default speed.
+
+**Conclusion: the fan hardware itself has last-speed memory**, independent of Bond,
+HA, and the wall switch. This means the `input_number.<room>_last_fan_speed` helpers
+(and their equivalent in any future Pi-direct design) exist *only* to keep **Bond's own
+belief** accurate for the UI/voice control - they play no role in the physical device
+behaving correctly for the user, since the hardware already does the right thing on
+its own from a bare power-on. Doesn't change today's working design, but is a genuine
+data point in favor of the simplification idea above: if that helper logic later moves
+into the Pi's Python process, it can be treated as low-stakes/best-effort persisted
+state rather than something that has to be perfectly accurate for the physical devices
+to work correctly.
+
+Diagnostic note: `mcp__bond__send_custom_action` returned `401 Unauthorized` for write
+actions (reads via the MCP tool work fine) - fell back to raw `curl` with the
+`bond-bridge-local` 1Password token for the real `SetSpeed`/`TurnOff`/`TurnOn` calls
+used in this test. Worth fixing the MCP tool's write auth if it gets used for
+diagnostics like this again.
