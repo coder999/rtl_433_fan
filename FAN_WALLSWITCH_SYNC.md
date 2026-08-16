@@ -483,3 +483,22 @@ actions (reads via the MCP tool work fine) - fell back to raw `curl` with the
 `bond-bridge-local` 1Password token for the real `SetSpeed`/`TurnOff`/`TurnOn` calls
 used in this test. Worth fixing the MCP tool's write auth if it gets used for
 diagnostics like this again.
+
+## In-progress replacement: Bond-rtl_433 RF Sync add-on (started 2026-08-16)
+
+The simplification idea above is being built for real, as a proper Home Assistant
+add-on rather than a Pi-side script: **`bond-rtl433-rf-sync`** in the
+`coder999/tuttleHAaddons` repo (design spec, implementation plan, and full session
+history in that repo's `docs/superpowers/`). It absorbs the Pi's decode/match/debounce
+logic plus the belief-only Bond correction directly into one self-contained add-on -
+no MQTT, no HA automations, no `rest_command` - configurable to run against a local
+USB dongle or a remote `rtl_tcp` source (the Pi, in this household's case).
+
+As of 2026-08-16: fully built (11 code tasks, TDD throughout, 60 tests), deployed to
+this HA instance, and dry-run validated against all 9 real wall-switch button
+combinations with zero mismatches. **Not yet live** - the pipeline documented above in
+this file (MQTT + the 9 HA automations + `fan_wallswitch_bridge.py` on the Pi) remains
+the active, working system and safety net until the new add-on completes live
+validation (real Bond corrections, not just dry-run logging) and a deliberate cutover.
+Nothing in this file's setup needs to change or be trusted less until that cutover
+actually happens.
