@@ -538,3 +538,27 @@ wall-switch automations this whole project is trying to fix) or genuinely absolu
 3. Decide the gas-meter/fan-monitor dongle-sharing approach long-term (permanent
    repurpose vs. a second dongle). For now, the meter services are being left stopped
    indefinitely per user preference — no need to restart them between capture sessions.
+
+## Upstream rtl_433 contribution draft (2026-08-16)
+
+`conf/hamptonbay-ceilingfan.conf` is a draft flex-decoder config for the
+official [merbanan/rtl_433](https://github.com/merbanan/rtl_433) project's
+`conf/` directory, describing this fan's own RF protocol (deliberately not
+mentioning the third-party wall switches used for this project's captures -
+Bond Bridge was independently confirmed to transmit bit-identical signals,
+so the protocol documented is the fixture's own receiver protocol, not tied
+to any one remote/switch product).
+
+Modeled on that repo's existing `honeywell-fan.conf`/`fan-11t.conf`. Bit
+offsets were empirically verified (not just derived from our own
+`fan_wallswitch_bridge.py` bit-math) by capturing real RF from known Bond
+actions and checking the decoded fields against independently-known values
+- see the file's own header comment for details.
+
+**Not yet submitted.** `docs/CONTRIBUTING.md` in that repo only documents a
+full C-decoder contribution path (with test recordings submitted to a
+separate `rtl_433_tests` repo) and doesn't mention the lighter `.conf`-only
+path at all, even though ~80 files using exactly that pattern already exist
+in `conf/` - so it's unclear whether this would be accepted as-is or
+redirected toward a full decoder. Ready to copy into a fork and open a PR
+whenever desired.
