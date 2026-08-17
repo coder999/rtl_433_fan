@@ -538,3 +538,17 @@ removed - so those were deleted manually via Settings → Devices & Services →
 Entities (filter: Unavailable). Confirmed zero `fan_wall_switch`/`last_fan_speed`
 entities remain anywhere in HA's live state. Nothing in this household's HA config
 references the old pipeline anymore.
+
+**A very old TODO item finally closed (2026-08-16):** this file's own
+["Immediate TODO"](#immediate-todo) list from **2026-07-30** - item 3 - flagged
+exactly this: *"Redesign the power/light automation split to account for the power
+button's real master-toggle behavior (currently two fully independent automations,
+which is wrong)."* That TODO was never acted on - it silently carried forward
+through the 2026-08-15 v2 redesign and into the new add-on's initial implementation,
+both of which kept the same wrong "toggle fan and light independently" logic for the
+power button. The real behavior (confirmed live, both mixed cases): the power button
+is a master toggle for the whole fixture driven by the fan's own on/off state - light
+always ends up matching the fan's *new* state, never toggled based on light's own
+prior state. Fixed in `bond-rtl433-rf-sync` v1.0.1 (`app/bond_client.py`'s
+`build_power_toggle_body`) - three weeks and two full redesigns after it was first
+identified.
